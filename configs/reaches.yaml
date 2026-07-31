@@ -1,0 +1,194 @@
+# configs/reaches.yaml
+# ---------------------------------------------------------------------------
+# Item 7 of the Day-1 checklist: parameterise the pipeline by reach geometry.
+#
+# EVERY script takes a --reach argument and reads this file. Nothing anywhere
+# in the codebase hard-codes a bounding box, a CRS, or a river name.
+#
+# Adding the Jamuna on Day 4 must be a one-line change here, not a code change.
+# ---------------------------------------------------------------------------
+
+project:
+  # Your Google Cloud project ID, created when you register for Earth Engine.
+  # Find it at https://console.cloud.google.com  (top bar, project selector)
+  ee_project: "REPLACE-WITH-YOUR-GCP-PROJECT-ID"
+
+  # Google Drive folder that Earth Engine exports land in.
+  # It is created automatically on first export. Do not nest it.
+  drive_folder: "padma_erosion"
+
+  # Where build_stack.py writes .npy caches (a local or Drive-mounted path)
+  cache_dir: "data/cache"
+
+
+defaults:
+  # -------------------------------------------------------------------------
+  # CRS: WGS 84 / UTM zone 45N. Metre units, WGS84 datum.
+  #
+  # Why this and not Bangladesh Transverse Mercator (EPSG:3106): BTM uses the
+  # Gulshan 303 datum, which is offset from WGS84 by several metres. All of
+  # your inputs — Landsat, Sentinel, GSW, Open Buildings, WorldPop — are WGS84.
+  # Staying in WGS84 avoids a datum shift you would otherwise have to manage
+  # in the asset-overlay step, where metre-level offsets actually matter.
+  #
+  # P1 extends ~0.7 deg past the 90E zone edge. UTM scale distortion there is
+  # ~0.1%, i.e. ~30 cm per 300 m. Irrelevant at 30 m pixels. Consistency across
+  # reaches is worth far more than zone purity — do not use different zones
+  # for different reaches or your cross-river transfer test will be invalid.
+  # -------------------------------------------------------------------------
+  crs: "EPSG:32645"
+
+  scale: 30                    # metres per pixel — matches GSW and Landsat natively
+
+  # GSW waterClass values counted as water when building the binary mask.
+  #   0 = no data   1 = not water   2 = seasonal water   3 = permanent water
+  #
+  # [2, 3] = the active channel belt, including seasonally exposed braid plain.
+  # [3]    = low-flow channel only. Cleaner separation of erosion from flood
+  #          inundation, but may miss braided-channel dynamics.
+  #
+  # DECIDE THIS BY LOOKING, on Day 1. Build both, plot ten years of each,
+  # and pick the one whose channel looks like the river. Then run the other
+  # as an ablation. This is a 20-minute check that prevents a week of doubt.
+  water_classes: [2, 3]
+
+  # Post-monsoon low-flow window, used when you build your own masks for
+  # 2022-2025. Land under water in September is flooded; land that is water
+  # the following February has been eroded. Keep this window identical for
+  # every year or you conflate the two.
+  composite_months: [11, 12, 1, 2]
+
+  years: [1988, 2021]          # GSW YearlyHistory coverage you will use
+
+  tile: 256                    # tile size in pixels (7.68 km at 30 m)
+  stride: 128                  # 50% overlap
+
+  split:                       # TEMPORAL. Never random.
+    train: [1988, 2012]
+    val:   [2013, 2016]
+    test:  [2017, 2021]        # touch once, Day 4 hour 16
+
+
+# ---------------------------------------------------------------------------
+# MEMORY — read before you touch the boxes below.
+#
+# These rivers run DIAGONALLY. A single rectangle around a diagonal river is
+# mostly empty floodplain. Measured, with `python data/gee_export.py --reach X`:
+#
+#     whole-reach box     P1  3816 x 3223 =  12.3 Mpx  ->  418 MB for 34 years
+#                         P2  5802 x 3030 =  17.6 Mpx  ->  598 MB
+#                         J1  2472 x 5586 =  13.8 Mpx  ->  470 MB
+#
+# P1 + P2 is therefore ~1.0 GB as uint8. That still fits Colab's ~12.7 GB RAM,
+# so the whole-reach boxes ARE workable — but only if you never materialise a
+# [T, C, H, W] float32 auxiliary stack. Six float32 aux channels over P1 alone
+# would be ~10 GB and will kill the session. See DATA_CONTRACT.md §5: static
+# aux is stored as float16, dynamic aux is computed per tile on the fly.
+#
+# Segmenting each reach into along-channel boxes (below) cuts this ~2.5x and is
+# the recommended path. Set `use_segments: true` once you have looked at the
+# GSW occurrence layer and confirmed the segments cover the active belt.
+# ---------------------------------------------------------------------------
+use_segments: false     # flip to true after the Day-1 visual check
+
+# ---------------------------------------------------------------------------
+# Reaches. bbox is [west, south, east, north] in EPSG:4326 decimal degrees.
+#
+# These are starting boxes. On Day 1, load each in the Earth Engine Code Editor,
+# overlay the GSW occurrence layer, and tighten them so they contain the active
+# channel belt plus ~3 km of floodplain either side. Then update this file and
+# commit it. Every downstream shape depends on these numbers, so change them
+# BEFORE you build the cache, not after.
+# ---------------------------------------------------------------------------
+reaches:
+
+  P1:
+    name: "Padma proper — Aricha/Goalundo to Chandpur"
+    river: "Padma"
+    bbox: [89.60, 23.10, 90.70, 23.95]
+    length_km: 120
+    priority: 1
+    # Along-channel segments, ~30 km each, following the river SE from Aricha
+    # towards Chandpur. Used when use_segments is true. Each is ~1.2 Mpx.
+    segments:
+      - [89.60, 23.65, 89.98, 23.95]     # Aricha confluence -> Dohar
+      - [89.92, 23.48, 90.28, 23.78]     # includes Padma Bridge (~90.263, 23.435)
+      - [90.20, 23.32, 90.52, 23.62]     # NARIA / SHARIATPUR — case-study reach
+      - [90.44, 23.12, 90.75, 23.42]     # -> Chandpur confluence
+    notes: >
+      PRIMARY STUDY REACH. Contains Naria and Shariatpur (the 2018 disaster
+      case study) and the Padma Bridge with its river training works. Channel
+      is typically 4-8 km wide, so one 256 px tile spans both banks — an
+      advantage the Jamuna does not have. If you are short of time or memory,
+      segment 3 alone is enough for the Naria hindcast.
+
+  P2:
+    name: "Ganges–Padma upper — Rajshahi/Godagari to Aricha"
+    river: "Padma"
+    bbox: [88.00, 23.70, 89.70, 24.50]
+    length_km: 130
+    priority: 1
+    segments:
+      - [88.00, 24.15, 88.45, 24.50]     # Godagari / Rajshahi
+      - [88.38, 23.95, 88.85, 24.32]
+      - [88.78, 23.80, 89.25, 24.12]     # Hardinge Bridge / Paksey gauge
+      - [89.18, 23.70, 89.72, 24.02]     # -> Aricha
+    notes: >
+      DO NOT SKIP THIS. P1 alone is ~120 km and roughly halves your training
+      data relative to the Jamuna. P1 + P2 gives ~250 km and removes the
+      reach-length objection entirely. Also called Padma in Bangladesh.
+
+  J1:
+    name: "Jamuna — Bahadurabad to Aricha"
+    river: "Jamuna"
+    bbox: [89.30, 23.80, 90.00, 25.30]
+    length_km: 220
+    priority: 2
+    segments:
+      - [89.55, 24.95, 90.00, 25.30]     # Bahadurabad
+      - [89.50, 24.60, 89.95, 25.00]
+      - [89.42, 24.25, 89.88, 24.65]     # Sirajganj
+      - [89.35, 23.90, 89.82, 24.30]
+      - [89.30, 23.80, 89.78, 23.98]     # -> Aricha
+    notes: >
+      Cross-river transfer test (ablation A9) and extra training data.
+      HARD RULE: no work on this before Day 4 hour 12. Because this file is
+      config-driven, enabling it later costs one command, not one day.
+      NOTE: the Jamuna braid belt is 10-15 km wide, so a 256 px tile (7.68 km)
+      cannot span both banks here. Mention this in the transfer-test discussion —
+      it is a plausible partial explanation for any drop in transfer performance.
+
+
+# ---------------------------------------------------------------------------
+# Zones excluded from headline metrics. Reported separately, never dropped
+# silently — a judge will ask what you did with them.
+# ---------------------------------------------------------------------------
+exclusions:
+  - name: "Aricha confluence"
+    centre: [89.72, 23.85]
+    radius_km: 5
+    reason: "Jamuna joins the Padma. Confluence dynamics are a known hard case."
+
+  - name: "Chandpur confluence"
+    centre: [90.63, 23.22]
+    radius_km: 5
+    reason: "Meghna confluence."
+
+
+# ---------------------------------------------------------------------------
+# Padma Bridge — contribution C6, the natural experiment.
+# River training works ~6,170 m, completed June 2022.
+# ---------------------------------------------------------------------------
+interventions:
+  padma_bridge:
+    centre: [90.263, 23.435]      # approx. mid-span, Mawa–Janjira
+    completion_year: 2022
+    rtw_length_m: 6170
+    control_offset_km: [40, 80]   # control segments up- and downstream
+    notes: >
+      Train on 1988-2016 only, predict 2017-2025, then test for a structural
+      break at 2022 as a function of distance from the works. A break shows
+      your model's assumptions were violated near the bridge. It does NOT show
+      the bridge caused a specific morphological change — monsoon variability,
+      upstream Jamuna dynamics and Farakka-influenced flow all confound it.
+      State that limitation explicitly.
